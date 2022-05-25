@@ -10,6 +10,21 @@ import aiohttp
 import yt_dlp
 import aiohttp
 import random
+import shutil
+import re
+import subprocess
+import os
+import sys
+
+from git import Repo
+from pyrogram.types import Message
+from Codexun.utils.filters import command
+from pyrogram import Client, filters
+from os import system, execle, environ
+from git.exc import InvalidGitRepositoryError
+from Codexun.utils.decorators import sudo_users_only
+from Codexun.config import UPSTREAM_REPO, BOT_USERNAME, SUDO_USERS, BOT_NAME
+
 
 from os import path
 from typing import Union
@@ -35,8 +50,8 @@ from pyrogram.types import (
 from pyrogram.errors import UserAlreadyParticipant, UserNotParticipant
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import ChatAdminRequired, UserNotParticipant, ChatWriteForbidden
-
-
+from Codexun.database.functions import start_restart_stage
+from Codexun.utils.decorators import errors
 from Codexun.tgcalls import calls, queues
 from Codexun.tgcalls.youtube import download
 from Codexun.tgcalls import convert as cconvert
@@ -51,7 +66,7 @@ from Codexun.database.queue import (
     music_off,
 )
 
-from Codexun import BOT_NAME, BOT_USERNAME
+from Codexun import BOT_NAME, BOT_USERNAME, OWNER
 from Codexun import app
 import Codexun.tgcalls
 from Codexun.tgcalls import youtube
@@ -75,6 +90,44 @@ from Codexun.utils.administrator import adminsOnly
 from Codexun.utils.errors import DurationLimitError
 from Codexun.utils.gets import get_url, get_file_name
 from Codexun.modules.admins import member_permissions
+
+def gen_chlog(repo, diff):
+    upstream_repo_url = Repo().remotes[0].config_reader.get("url").replace(".git", "")
+    ac_br = repo.active_branch.name
+    ch_log = tldr_log = ""
+    ch = f"<b>updates for <a href={upstream_repo_url}/tree/{ac_br}>[{ac_br}]</a>:</b>"
+    ch_tl = f"updates for {ac_br}:"
+    d_form = "%d/%m/%y || %H:%M"
+    for c in repo.iter_commits(diff):
+        ch_log += (
+            f"\n\n💬 <b>{c.count()}</b> 🗓 <b>[{c.committed_datetime.strftime(d_form)}]</b>\n<b>"
+            f"<a href={upstream_repo_url.rstrip('/')}/commit/{c}>[{c.summary}]</a></b> 👨‍💻 <code>{c.author}</code>"
+        )
+        tldr_log += f"\n\n💬 {c.count()} 🗓 [{c.committed_datetime.strftime(d_form)}]\n[{c.summary}] 👨‍💻 {c.author}"
+    if ch_log:
+        return str(ch + ch_log), str(ch_tl + tldr_log)
+    return ch_log, tldr_log
+
+
+def updater():
+    try:
+        repo = Repo()
+    except InvalidGitRepositoryError:
+        repo = Repo.init()
+        origin = repo.create_remote("upstream", UPSTREAM_REPO)
+        origin.fetch()
+        repo.create_head("main", origin.refs.main)
+        repo.heads.main.set_tracking_branch(origin.refs.main)
+        repo.heads.main.checkout(True)
+    ac_br = repo.active_branch.name
+    if "upstream" in repo.remotes:
+        ups_rem = repo.remote("upstream")
+    else:
+        ups_rem = repo.create_remote("upstream", UPSTREAM_REPO)
+    ups_rem.fetch(ac_br)
+    changelog, tl_chnglog = gen_chlog(repo, f"HEAD..upstream/{ac_br}")
+    return bool(changelog)
+
 
 
 def others_markup(videoid, user_id):
@@ -157,7 +210,42 @@ third_keyboard = InlineKeyboardMarkup(
         ],
     ]
 )
+update_keyboard = InlineKeyboardMarkup(
+    [
+        [
+            
+            InlineKeyboardButton("Check Update ➡️", callback_data="cheupdate"),
+            
+        ],
+        [
+            InlineKeyboardButton(text="Close 🗑️", callback_data=f"cls"),
+        ],
+    ]
+)
 
+already = InlineKeyboardMarkup(
+    [
+        
+        [
+            InlineKeyboardButton(text="Close 🗑️", callback_data=f"cls"),
+        ],
+    ]
+)
+confirm = InlineKeyboardMarkup(
+    [
+        [
+            
+            InlineKeyboardButton("Update Now ♻️", callback_data="confm_update"),
+            
+        ],
+        [
+            InlineKeyboardButton(text="Cancel it 🚫", callback_data=f"cls"),
+        ],
+        [
+            InlineKeyboardButton(text="Close 🗑️", callback_data=f"cls"),
+        ],
+    ]
+)
 second_keyboard = InlineKeyboardMarkup(
     [
         [
@@ -280,6 +368,50 @@ menu_keyboard = InlineKeyboardMarkup(
     ]
 )
 
+
+@Client.on_message(command(["update"]) & filters.group & ~filters.edited)
+async def update(client: Client, message: Message):
+    await message.reply_photo(
+        photo=f"{START_IMG}",
+        caption=f"""**Hey {message.from_user.mention()}** 👋
+Kindly first check for available updates below.""",
+    reply_markup=update_keyboard
+    )
+@Client.on_callback_query(filters.regex("cheupdate"))
+async def cheupdate(_, CallbackQuery):
+    chat_id = CallbackQuery.message.chat.id
+    msg = await CallbackQuery.answer("checking for updates..")
+    update_avail = updater()
+    if update_avail:
+        await CallbackQuery.edit_message_text("Update available 🚀\n\nClick on the button given below if you want to update your bot with latest one!", reply_markup=confirm)
+        system("git pull -f && pip3 install -r requirements.txt")
+        execle(sys.executable, sys.executable, "main.py", environ)
+        return
+    await CallbackQuery.edit_message_text("Bot is already in up-to-date with **[main version](https://github.com/PavanMagar/CodexunMusicBot)**", disable_web_page_preview=True, reply_markup=already)
+
+@Client.on_callback_query(filters.regex("confm_update"))
+@errors
+async def confm_update(_, CallbackQuery):
+    m = subprocess.check_output(["git", "pull"]).decode("UTF-8")
+    if str(m[0]) != "A":
+        x = await CallbackQuery.answer("Update Found, updating...")
+        await start_restart_stage(x.chat.id, x.message_id)
+        os.execvp("python3", ["python3", "-m", "Codexun"])
+    else:
+        await CallbackQuery.answer("it's already up-to-date")
+        
+async def aexec(code, client, message):
+    exec(
+        "async def __aexec(client, message): "
+        + "".join(f"\n {a}" for a in code.split("\n"))
+    )
+    return await locals()["__aexec"](client, message)
+
+
+async def edit_or_reply(msg: Message, **kwargs):
+    func = msg.edit_text if msg.from_user.is_self else msg.reply
+    spec = getfullargspec(func.__wrapped__).args
+    await func(**{k: v for k, v in kwargs.items() if k in spec})
 
 @Client.on_callback_query(filters.regex("skipvc"))
 async def skipvc(_, CallbackQuery):
